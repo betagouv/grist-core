@@ -9,6 +9,7 @@ import { getDatabaseUrl } from 'app/server/lib/serverUtils';
 import { getTelemetryPrefs } from 'app/server/lib/Telemetry';
 import { Gristifier } from 'app/server/utils/gristify';
 import { pruneActionHistory } from 'app/server/utils/pruneActionHistory';
+import { dumpWeeklyActionStats } from 'app/server/utils/dumpWeeklyActionStats';
 import { showAuditLogEvents } from 'app/server/utils/showAuditLogEvents';
 import * as commander from 'commander';
 import { Connection } from 'typeorm';
@@ -82,6 +83,10 @@ export function addHistoryCommand(program: commander.Command, options: CommandOp
     .description('remove all but last N actions from doc')
     .argument('[N]', 'number of actions to keep', parseIntForCommander, 1)
     .action(pruneActionHistory);
+  sub('dump <docId>')
+    .description('remove all but last N actions from doc')
+    .argument('[N]', 'number of actions to keep', parseIntForCommander, 1)
+    .action(dumpWeeklyActionStats);
 }
 
 // Add commands for general configuration
