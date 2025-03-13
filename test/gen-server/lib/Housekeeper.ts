@@ -293,5 +293,9 @@ describe('Housekeeper', function() {
       const lastCall = keeper.cleanupCache();
       await assert.isFulfilled(lastCall, "should successfully run cleanupCache without any document to clean up");
     });
+
+    it.skip('can reopen a document whose cache has been wiped', async function () {
+
+    });
   });
 });
