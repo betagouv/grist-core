@@ -68,6 +68,11 @@ export class DocManager extends EventEmitter {
   // Remember timing mode of documents, when document is recreated it is put in the same mode.
   private _inTimingOn = new MapWithTTL<string, boolean>(TIMING_ON_CACHE_TTL);
 
+  // Store the doc names whose cache should be cleaned up after a certain time
+  // in case of remote doc storage and their timestamp since they have been closed.
+  private _docsToClean = new Map<string, number>();
+  private _cleanupDocCachePromise: Promise<void> = Promise.resolve();
+
   constructor(
     public readonly storageManager: IDocStorageManager,
     public readonly pluginManager: PluginManager|null,
@@ -314,6 +319,9 @@ export class DocManager extends EventEmitter {
     if (typeof options === 'string') {
       throw new Error('openDoc call with outdated parameter type');
     }
+    await this._cleanupDocCachePromise;
+    // Don't clean up the doc's cache during the next batch
+    this._docsToClean.delete(docId);
     const openMode = options?.openMode || 'default';
     const linkParameters = options?.linkParameters || {};
     const originalUrlId = options?.originalUrlId;
@@ -493,6 +501,33 @@ export class DocManager extends EventEmitter {
   public removeActiveDoc(activeDoc: ActiveDoc): void {
     this.unregisterSQLiteDB(activeDoc.docName);
     this._activeDocs.delete(activeDoc.docName);
+    this._docsToClean.set(activeDoc.docName, Date.now());
+  }
+
+  /**
+   * Clean up docs cache (local copy of the documents).
+   */
+  public async cleanupDocsCache(cleanBefore: Date) {
+    if (!this.storageManager.wipeCache) {
+      log.debug("Nothing to do regarding the cache");
+      this._docsToClean.clear();
+      return;
+    }
+    let cleanedupDocsCacheCounter = 0;
+    const docsCacheToCleanup: string[] = [...this._docsToClean.entries()]
+      .filter(([, closeTimestamp]) => closeTimestamp <= cleanBefore.getTime())
+      .map(([docId]) => docId);
+    log.debug(`${docsCacheToCleanup.length} documents local copies to clean up`);
+    for (const docId of docsCacheToCleanup) {
+      try {
+        this._docsToClean.delete(docId);
+        await this.storageManager.wipeCache(docId);
+        cleanedupDocsCacheCounter++;
+      } catch (e) {
+        log.error(`Failed to clean up local copy of ${docId}: ${e.stack}`);
+      }
+    }
+    log.debug(`Cache cleaned up for ${cleanedupDocsCacheCounter} out of a total of ${docsCacheToCleanup.length}`);
   }
 
   public async renameDoc(client: Client, oldName: string, newName: string): Promise<void> {

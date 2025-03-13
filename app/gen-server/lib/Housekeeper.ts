@@ -7,6 +7,7 @@ import { Organization } from 'app/gen-server/entity/Organization';
 import { Workspace } from 'app/gen-server/entity/Workspace';
 import { HomeDBManager, Scope } from 'app/gen-server/lib/homedb/HomeDBManager';
 import { fromNow } from 'app/gen-server/sqlUtils';
+import { appSettings } from 'app/server/lib/AppSettings';
 import { getAuthorizedUserId } from 'app/server/lib/Authorizer';
 import { expressWrap } from 'app/server/lib/expressWrap';
 import { GristServer } from 'app/server/lib/GristServer';
@@ -21,10 +22,18 @@ import { EntityManager } from 'typeorm';
 
 const DELETE_TRASH_PERIOD_MS = 1 * 60 * 60 * 1000;  // operate every 1 hour
 const LOG_METRICS_PERIOD_MS = 24 * 60 * 60 * 1000;  // operate every day
+const CLEANUP_CACHE_PERIOD_MS = appSettings.section('housekeeping').readInt({
+  envVar: 'GRIST_CLEANUP_CACHE_PERIOD_MS',
+  defaultValue: 1 * 60 * 60 * 1000,  // operate every 1 hour
+})!;
 const AGE_THRESHOLD_OFFSET = '-30 days';            // should be an interval known by postgres + sqlite
 
 const SYNC_WORK_LIMIT_MS = 50;      // Don't keep doing synchronous work longer than this.
 const SYNC_WORK_BREAK_MS = 50;      // Once reached SYNC_WORK_LIMIT_MS, take a break of this length.
+
+export const Deps = {
+  CLEANUP_CACHE_PERIOD_MS
+};
 
 /**
  * Take care of periodic tasks:
@@ -41,6 +50,7 @@ const SYNC_WORK_BREAK_MS = 50;      // Once reached SYNC_WORK_LIMIT_MS, take a b
 export class Housekeeper {
   private _deleteTrashinterval?: NodeJS.Timeout;
   private _logMetricsInterval?: NodeJS.Timeout;
+  private _cleanupCacheInterval?: NodeJS.Timeout;
   private _electionKey?: string;
   private _telemetry = this._server.getTelemetry();
 
@@ -59,13 +69,16 @@ export class Housekeeper {
     this._logMetricsInterval = setInterval(() => {
       this.logMetricsExclusively().catch(log.warn.bind(log));
     }, LOG_METRICS_PERIOD_MS);
+    this._cleanupCacheInterval = setInterval(() => {
+      this.cleanupCache().catch(log.warn.bind(log));
+    }, Deps.CLEANUP_CACHE_PERIOD_MS);
   }
 
   /**
    * Stop scheduling housekeeping tasks.  Note: doesn't wait for any housekeeping task in progress.
    */
   public async stop() {
-    for (const interval of ['_deleteTrashinterval', '_logMetricsInterval'] as const) {
+    for (const interval of ['_deleteTrashinterval', '_logMetricsInterval', '_cleanupCacheInterval'] as const) {
       clearInterval(this[interval]);
       this[interval] = undefined;
     }
@@ -224,6 +237,11 @@ export class Housekeeper {
         });
       });
     }
+  }
+
+  public async cleanupCache() {
+    const cleanBefore = new Date(Date.now() - Deps.CLEANUP_CACHE_PERIOD_MS);
+    return await this._server.getDocManager().cleanupDocsCache(cleanBefore);
   }
 
   public addEndpoints(app: express.Application) {

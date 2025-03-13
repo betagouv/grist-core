@@ -591,10 +591,11 @@ export class HostedStorageManager implements IDocStorageManager {
    */
   public async wipeCache(docName: string) {
     // NOTE: fse.remove succeeds also when the file does not exist.
+    this._log.info(docName, "Removing local copy of this doc");
     await fse.remove(this.getPath(docName));
     await fse.remove(this._getHashFile(this.getPath(docName), 'doc'));
     await fse.remove(this._getHashFile(this.getPath(docName), 'meta'));
-    await this._inventory.clear(docName);
+    await this._inventory?.clear(docName);
     this._latestVersions.delete(docName);
     this._latestMetaVersions.delete(docName);
   }

@@ -1,7 +1,7 @@
 import { TelemetryEvent, TelemetryMetadataByLevel } from 'app/common/Telemetry';
 import { Document } from 'app/gen-server/entity/Document';
 import { Workspace } from 'app/gen-server/entity/Workspace';
-import { Housekeeper } from 'app/gen-server/lib/Housekeeper';
+import { Deps, Housekeeper } from 'app/gen-server/lib/Housekeeper';
 import { Telemetry } from 'app/server/lib/Telemetry';
 import { assert } from 'chai';
 import * as fse from 'fs-extra';
@@ -11,16 +11,21 @@ import { TestServer } from 'test/gen-server/apiUtils';
 import { openClient } from 'test/server/gristClient';
 import * as testUtils from 'test/server/testUtils';
 
+import * as fs from 'node:fs';
+import { ActiveSessionInfo } from 'app/common/UserAPI';
+
 describe('Housekeeper', function() {
   testUtils.setTmpLogLevel('error');
   this.timeout(60000);
 
   const org: string = 'testy';
   const sandbox = sinon.createSandbox();
+  const CUSTOM_CLEANUP_CACHE_PERIOD_MS = 60 * 1000; // Every minutes
   let home: TestServer;
   let keeper: Housekeeper;
 
   before(async function() {
+    Deps.CLEANUP_CACHE_PERIOD_MS = CUSTOM_CLEANUP_CACHE_PERIOD_MS;
     home = new TestServer(this);
     await home.start(['home', 'docs']);
     const api = await home.createHomeApi('chimpy', 'docs');
@@ -31,6 +36,9 @@ describe('Housekeeper', function() {
 
   after(async function() {
     await home.stop();
+  });
+
+  afterEach(function () {
     sandbox.restore();
   });
 
@@ -203,5 +211,73 @@ describe('Housekeeper', function() {
       'numViewers',
     ]);
     assert.isUndefined(meta?.full);
+  });
+
+  describe('cache management', function () {
+    let clock: sinon.SinonFakeTimers|undefined;
+    function doesFileInCache(docName: string) {
+      const path = home.server.getStorageManager().getPath(docName);
+      return fs.existsSync(path);
+    }
+
+    async function openDoc(docName: string, session: ActiveSessionInfo) {
+      const client = await openClient(home.server, session.user.email, session.org?.domain || 'docs');
+      await client.openDocOnConnect(docName);
+      return client;
+    }
+
+    afterEach(async function () {
+      await clock?.runAllAsync();
+      clock?.restore();
+      await keeper.stop();
+    });
+
+    it('removes local copies of document after a document has been closed for a while', async function () {
+      clock = sandbox.useFakeTimers({
+        shouldAdvanceTime: true,
+        now: Date.now()
+      });
+      const api = await home.createHomeApi('chimpy', org);
+      const ws = await api.newWorkspace({name: 'ws-test-cache'}, 'current');
+      const docOpenOnce = await api.newDoc({ name: 'doc-open-once'}, ws);
+      const docOpenTwice = await api.newDoc({ name: 'doc-open-twice'}, ws);
+      const session = await api.getSessionActive();
+
+      const clientOpenOnce = await openDoc(docOpenOnce, session);
+      let clientOpenTwice = await openDoc(docOpenTwice, session);
+      await clock.tickAsync(CUSTOM_CLEANUP_CACHE_PERIOD_MS * 3);
+      await keeper.cleanupCache();
+      assert.isTrue(doesFileInCache(docOpenOnce), 'the first document should remain in cache as long as it is open');
+      assert.isTrue(doesFileInCache(docOpenTwice), 'the second document should remain in cache as long as it is open');
+
+      await clientOpenOnce.close();
+      await clientOpenTwice.close();
+      await clock.runAllAsync();
+
+      // Reopen the second doc
+      clientOpenTwice = await openDoc(docOpenTwice, session);
+      await clock.runAllAsync();
+      assert.isTrue(
+        doesFileInCache(docOpenOnce),
+        'the first document cache should remain in cache within a grace period'
+      );
+      assert.isTrue(doesFileInCache(docOpenTwice), 'the second document cache should remain as long it is not closed');
+      await clock.tickAsync(CUSTOM_CLEANUP_CACHE_PERIOD_MS * 2);
+      await keeper.cleanupCache();
+      assert.isFalse(doesFileInCache(docOpenOnce),
+        'the first document cache should have been removed after the grace period since it has been closed'
+      );
+      assert.isTrue(doesFileInCache(docOpenTwice), 'the second document cache should remain as it has been reopened');
+      await clientOpenTwice.close();
+      await clock.runAllAsync();
+      await clock.tickAsync(CUSTOM_CLEANUP_CACHE_PERIOD_MS * 2);
+      await keeper.cleanupCache();
+      assert.isFalse(doesFileInCache(docOpenTwice),
+        'the second document cache should be removed now that the document is closed'
+      );
+
+      const lastCall = keeper.cleanupCache();
+      await assert.isFulfilled(lastCall, "should successfully run cleanupCache without any document to clean up");
+    });
   });
 });
