@@ -590,6 +590,11 @@ export class HostedStorageManager implements IDocStorageManager {
    * Remove local version of a document, and state related to it.
    */
   public async wipeCache(docName: string) {
+    if (this._disableS3) {
+      this._log.info(docName, "wipeCache: no cache to clean up as s3 is not enabled.");
+      return;
+    }
+
     this._log.info(docName, "Removing local copy of this doc");
     // NOTE: fse.remove succeeds also when the file does not exist.
     await fse.remove(this.getPath(docName));

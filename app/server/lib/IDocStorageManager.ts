@@ -67,7 +67,6 @@ export class TrivialDocStorageManager implements IDocStorageManager {
   public prepareToCloseStorage() {}
   public async getCopy(): Promise<never> { throw new Error('no'); }
   public async flushDoc() {}
-  public async wipeCache(): Promise<void> {}
   public async getSnapshots(): Promise<never> { throw new Error('no'); }
   public async removeSnapshots(): Promise<never> { throw new Error('no'); }
   public getSnapshotProgress(): SnapshotProgress { return new EmptySnapshotProgress(); }

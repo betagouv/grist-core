@@ -21,13 +21,14 @@ describe('Housekeeper', function() {
   const org: string = 'testy';
   const sandbox = sinon.createSandbox();
   const CUSTOM_CLEANUP_CACHE_PERIOD_MS = 60 * 1000; // Every minutes
+  const externalStorageEnabled = Boolean(process.env.GRIST_DOCS_MINIO_ACCESS_KEY);
   let home: TestServer;
   let keeper: Housekeeper;
 
   before(async function() {
     Deps.CLEANUP_CACHE_PERIOD_MS = CUSTOM_CLEANUP_CACHE_PERIOD_MS;
     home = new TestServer(this);
-    await home.start(['home', 'docs']);
+    await home.start(['home', 'docs'], {externalStorage: externalStorageEnabled});
     const api = await home.createHomeApi('chimpy', 'docs');
     await api.newOrg({name: org, domain: org});
     keeper = home.server.housekeeper;
@@ -232,6 +233,10 @@ describe('Housekeeper', function() {
       }
       await clock.runAllAsync(); // This ensures the documents gets closed
     }
+
+    before(function () {
+      if (!externalStorageEnabled) { this.skip(); }
+    });
 
     afterEach(async function () {
       await clock?.runAllAsync();

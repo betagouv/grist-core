@@ -55,10 +55,6 @@ interface ServerOptions extends FlexServerOptions {
   // If set, messages logged to console (default: false)
   // (but if options are not given at all in call to main, logToConsole is set to true)
   logToConsole?: boolean;
-
-  // If set, documents saved to external storage such as s3 (default is to check environment variables,
-  // which get set in various ways in dev/test entry points)
-  externalStorage?: boolean;
 }
 
 export class MergedServer {

@@ -116,6 +116,10 @@ export interface FlexServerOptions {
 
   // Global grist config options
   settings?: IGristCoreConfig;
+
+  // If set, documents saved to external storage such as s3 (default is to check environment variables,
+  // which get set in various ways in dev/test entry points)
+  externalStorage?: boolean;
 }
 
 const noop: express.RequestHandler = (req, res, next) => next();
