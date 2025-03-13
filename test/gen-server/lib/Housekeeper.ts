@@ -8,7 +8,7 @@ import * as fse from 'fs-extra';
 import moment from 'moment';
 import * as sinon from 'sinon';
 import { TestServer } from 'test/gen-server/apiUtils';
-import { openClient } from 'test/server/gristClient';
+import { GristClient, openClient } from 'test/server/gristClient';
 import * as testUtils from 'test/server/testUtils';
 
 import * as fs from 'node:fs';
@@ -226,6 +226,13 @@ describe('Housekeeper', function() {
       return client;
     }
 
+    async function closeDocClients(clients: GristClient[], clock: sinon.SinonFakeTimers) {
+      for (const client of clients) {
+        await client.close();
+      }
+      await clock.runAllAsync(); // This ensures the documents gets closed
+    }
+
     afterEach(async function () {
       await clock?.runAllAsync();
       clock?.restore();
@@ -243,6 +250,7 @@ describe('Housekeeper', function() {
       const docOpenTwice = await api.newDoc({ name: 'doc-open-twice'}, ws);
       const session = await api.getSessionActive();
 
+      // Check whether the documents cache are not wiped as long as they are open
       const clientOpenOnce = await openDoc(docOpenOnce, session);
       let clientOpenTwice = await openDoc(docOpenTwice, session);
       await clock.tickAsync(CUSTOM_CLEANUP_CACHE_PERIOD_MS * 3);
@@ -250,32 +258,33 @@ describe('Housekeeper', function() {
       assert.isTrue(doesFileInCache(docOpenOnce), 'the first document should remain in cache as long as it is open');
       assert.isTrue(doesFileInCache(docOpenTwice), 'the second document should remain in cache as long as it is open');
 
-      await clientOpenOnce.close();
-      await clientOpenTwice.close();
-      await clock.runAllAsync();
+      // Now close the clients (and therefore the docs)
+      await closeDocClients([clientOpenOnce, clientOpenTwice], clock);
 
-      // Reopen the second doc
+      // Wait a bit, not enough beyond the grace period
+      await clock.tickAsync(1000);
+      await keeper.cleanupCache();
+      assert.isTrue(doesFileInCache(docOpenOnce), 'the first document should remain within the grace period');
+      assert.isTrue(doesFileInCache(docOpenTwice), 'the second document should remain within the grace period');
+
+      // Reopen the second doc, tick beyond the grace period and run the cache cleanup
       clientOpenTwice = await openDoc(docOpenTwice, session);
-      await clock.runAllAsync();
-      assert.isTrue(
-        doesFileInCache(docOpenOnce),
-        'the first document cache should remain in cache within a grace period'
-      );
-      assert.isTrue(doesFileInCache(docOpenTwice), 'the second document cache should remain as long it is not closed');
       await clock.tickAsync(CUSTOM_CLEANUP_CACHE_PERIOD_MS * 2);
       await keeper.cleanupCache();
       assert.isFalse(doesFileInCache(docOpenOnce),
         'the first document cache should have been removed after the grace period since it has been closed'
       );
       assert.isTrue(doesFileInCache(docOpenTwice), 'the second document cache should remain as it has been reopened');
-      await clientOpenTwice.close();
-      await clock.runAllAsync();
+
+      // Now close the second document, and check that its cache gets cleaned up
+      await closeDocClients([clientOpenTwice], clock);
       await clock.tickAsync(CUSTOM_CLEANUP_CACHE_PERIOD_MS * 2);
       await keeper.cleanupCache();
       assert.isFalse(doesFileInCache(docOpenTwice),
         'the second document cache should be removed now that the document is closed'
       );
 
+      // Ensure now that the method can be called without any document cache to be cleaned up
       const lastCall = keeper.cleanupCache();
       await assert.isFulfilled(lastCall, "should successfully run cleanupCache without any document to clean up");
     });
