@@ -37,7 +37,6 @@ import * as path from 'path';
 import {createClient, RedisClient} from 'redis';
 import * as sinon from 'sinon';
 import {createInitialDb, removeConnection, setUpDB} from 'test/gen-server/seed';
-import {waitToPass} from 'test/nbrowser/gristUtils';
 import {createTmpDir, getGlobalPluginManager} from 'test/server/docTools';
 import {EnvironmentSnapshot, setTmpLogLevel, useFixtureDoc} from 'test/server/testUtils';
 import {waitForIt} from 'test/server/wait';
@@ -541,14 +540,14 @@ describe('HostedStorageManager', function() {
 
       it('can save modifications', async function() {
         await store.run(async () => {
-          await workers.assignDocWorker('Hello');
-          await useFixtureDoc('Hello.grist', store.storageManager);
+          await workers.assignDocWorker('World');
+          await useFixtureDoc('World.grist', store.storageManager);
 
           await workers.assignDocWorker('Hello2');
 
-          const doc = await store.docManager.fetchDoc(docSession, 'Hello');
+          const doc = await store.docManager.fetchDoc(docSession, 'World');
           const doc2 = await store.docManager.fetchDoc(docSession, 'Hello2');
-          await doc.docStorage.exec("update Table1 set A = 'magic_word' where id = 1");
+          await doc.docStorage.exec("update Table1 set a = 'magic_word' where id = 1");
           await doc2.docStorage.exec("insert into Table1(id) values(42)");
           return { doc, doc2 };
         });
@@ -556,9 +555,9 @@ describe('HostedStorageManager', function() {
         await store.removeAll();
 
         await store.run(async () => {
-          const doc = await store.docManager.fetchDoc(docSession, 'Hello');
-          let result = await doc.docStorage.get("select A from Table1 where id = 1");
-          assert.equal(result!.A, 'magic_word');
+          const doc = await store.docManager.fetchDoc(docSession, 'World');
+          let result = await doc.docStorage.get("select * from Table1 where id = 1");
+          assert.equal(result!.a, 'magic_word');
           const doc2 = await store.docManager.fetchDoc(docSession, 'Hello2');
           result = await doc2.docStorage.get("select id from Table1");
           assert.equal(result!.id, 42);
@@ -1163,7 +1162,7 @@ describe('HostedStorageManager', function() {
           assert.match(String(backupError), /source closed/);
           assert.equal(done, false);
           // Wait a while longer and see if backup terminates
-          await waitToPass(async () => assert.equal(done, true), 3000);
+          await waitForIt(() => assert.equal(done, true), 3000, 50);
           // That's all we can test in this test variant now we closed the db.
           return;
         }
