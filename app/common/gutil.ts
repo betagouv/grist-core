@@ -15,6 +15,7 @@ import {
 } from 'grainjs';
 import {Observable as KoObservable} from 'knockout';
 import identity = require('lodash/identity');
+import { setTimeout } from 'timers/promises';
 
 // Some definitions have moved to be used by plugin API.
 export {arrayRepeat} from 'app/plugin/gutil';
@@ -924,7 +925,7 @@ export async function timeoutReached(
   const timedOut = {};
   // Be careful to clean up the timer after ourselves, so it doesn't remain in the event loop.
   let timer: NodeJS.Timer;
-  const delayPromise = new Promise<any>((resolve) => { timer = setTimeout(() => resolve(timedOut), msec); });
+  const delayPromise = setTimeout(msec);
   try {
     const res = await Promise.race([promise, delayPromise]);
     return res == timedOut;

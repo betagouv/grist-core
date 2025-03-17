@@ -1,7 +1,9 @@
+import { setTimeout } from "timers/promises";
+
 /**
  * Returns a promise that resolves in the given number of milliseconds.
  * (A replica of bluebird.delay using native promises.)
+ *
+ * @deprecated: Use setTimeout of "timers/promises" instead
  */
-export function delay(msec: number): Promise<void> {
-  return new Promise<void>((resolve) => setTimeout(resolve, msec));
-}
+export const delay = setTimeout;
