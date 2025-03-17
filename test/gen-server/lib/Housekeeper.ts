@@ -215,8 +215,7 @@ describe('Housekeeper', function() {
   });
 
   describe('cache management', function () {
-    let clock: sinon.SinonFakeTimers|undefined;
-    function doesFileInCache(docName: string) {
+    function isFileInCache(docName: string) {
       const path = home.server.getStorageManager().getPath(docName);
       return fs.existsSync(path);
     }
@@ -238,64 +237,100 @@ describe('Housekeeper', function() {
       if (!externalStorageEnabled) { this.skip(); }
     });
 
+    async function withClock<T>(cb: (clock: sinon.SinonFakeTimers) => Promise<T>) {
+      const clock = sandbox.useFakeTimers({
+        shouldAdvanceTime: true,
+        advanceTimeDelta: 16,
+        now: Date.now()
+      });
+      try {
+        return await cb(clock);
+      } finally {
+        clock.restore();
+      }
+    }
+
     afterEach(async function () {
-      await clock?.runAllAsync();
-      clock?.restore();
       await keeper.stop();
     });
 
     it('removes local copies of document after a document has been closed for a while', async function () {
-      clock = sandbox.useFakeTimers({
-        shouldAdvanceTime: true,
-        now: Date.now()
+      return withClock(async clock => {
+        const api = await home.createHomeApi('chimpy', org);
+        const ws = await api.newWorkspace({name: 'ws-test-cache'}, 'current');
+        const docOpenOnce = await api.newDoc({ name: 'doc-open-once'}, ws);
+        const docOpenTwice = await api.newDoc({ name: 'doc-open-twice'}, ws);
+        const session = await api.getSessionActive();
+
+        // Check whether the documents cache are not wiped as long as they are open
+        const clientOpenOnce = await openDoc(docOpenOnce, session);
+        let clientOpenTwice = await openDoc(docOpenTwice, session);
+        await clock.tickAsync(CUSTOM_CLEANUP_CACHE_PERIOD_MS * 3);
+        await keeper.cleanupCache();
+        assert.isTrue(isFileInCache(docOpenOnce), 'the first document should remain in cache as long as it is open');
+        assert.isTrue(isFileInCache(docOpenTwice),
+          'the second document should remain in cache as long as it is open');
+
+        // Now close the clients (and therefore the docs)
+        await closeDocClients([clientOpenOnce, clientOpenTwice], clock);
+
+        // Wait a bit, not enough beyond the grace period
+        await clock.tickAsync(1000);
+        await keeper.cleanupCache();
+        assert.isTrue(isFileInCache(docOpenOnce), 'the first document should remain within the grace period');
+        assert.isTrue(isFileInCache(docOpenTwice), 'the second document should remain within the grace period');
+
+        // Reopen the second doc, tick beyond the grace period and run the cache cleanup
+        clientOpenTwice = await openDoc(docOpenTwice, session);
+        await clock.tickAsync(CUSTOM_CLEANUP_CACHE_PERIOD_MS);
+        await keeper.cleanupCache();
+        assert.isFalse(isFileInCache(docOpenOnce),
+          'the first document cache should have been removed after the grace period since it has been closed'
+        );
+        assert.isTrue(isFileInCache(docOpenTwice), 'the second document cache should remain as it has been reopened');
+
+        // Now close the second document, and check that its cache gets cleaned up
+        await closeDocClients([clientOpenTwice], clock);
+        await clock.tickAsync(CUSTOM_CLEANUP_CACHE_PERIOD_MS);
+        await keeper.cleanupCache();
+        assert.isFalse(isFileInCache(docOpenTwice),
+          'the second document cache should be removed now that the document is closed'
+        );
+
+        // Ensure now that the method can be called without any document cache to be cleaned up
+        const lastCall = keeper.cleanupCache();
+        await assert.isFulfilled(lastCall, "should successfully run cleanupCache without any document to clean up");
       });
-      const api = await home.createHomeApi('chimpy', org);
-      const ws = await api.newWorkspace({name: 'ws-test-cache'}, 'current');
-      const docOpenOnce = await api.newDoc({ name: 'doc-open-once'}, ws);
-      const docOpenTwice = await api.newDoc({ name: 'doc-open-twice'}, ws);
-      const session = await api.getSessionActive();
-
-      // Check whether the documents cache are not wiped as long as they are open
-      const clientOpenOnce = await openDoc(docOpenOnce, session);
-      let clientOpenTwice = await openDoc(docOpenTwice, session);
-      await clock.tickAsync(CUSTOM_CLEANUP_CACHE_PERIOD_MS * 3);
-      await keeper.cleanupCache();
-      assert.isTrue(doesFileInCache(docOpenOnce), 'the first document should remain in cache as long as it is open');
-      assert.isTrue(doesFileInCache(docOpenTwice), 'the second document should remain in cache as long as it is open');
-
-      // Now close the clients (and therefore the docs)
-      await closeDocClients([clientOpenOnce, clientOpenTwice], clock);
-
-      // Wait a bit, not enough beyond the grace period
-      await clock.tickAsync(1000);
-      await keeper.cleanupCache();
-      assert.isTrue(doesFileInCache(docOpenOnce), 'the first document should remain within the grace period');
-      assert.isTrue(doesFileInCache(docOpenTwice), 'the second document should remain within the grace period');
-
-      // Reopen the second doc, tick beyond the grace period and run the cache cleanup
-      clientOpenTwice = await openDoc(docOpenTwice, session);
-      await clock.tickAsync(CUSTOM_CLEANUP_CACHE_PERIOD_MS * 2);
-      await keeper.cleanupCache();
-      assert.isFalse(doesFileInCache(docOpenOnce),
-        'the first document cache should have been removed after the grace period since it has been closed'
-      );
-      assert.isTrue(doesFileInCache(docOpenTwice), 'the second document cache should remain as it has been reopened');
-
-      // Now close the second document, and check that its cache gets cleaned up
-      await closeDocClients([clientOpenTwice], clock);
-      await clock.tickAsync(CUSTOM_CLEANUP_CACHE_PERIOD_MS * 2);
-      await keeper.cleanupCache();
-      assert.isFalse(doesFileInCache(docOpenTwice),
-        'the second document cache should be removed now that the document is closed'
-      );
-
-      // Ensure now that the method can be called without any document cache to be cleaned up
-      const lastCall = keeper.cleanupCache();
-      await assert.isFulfilled(lastCall, "should successfully run cleanupCache without any document to clean up");
     });
 
-    it.skip('can reopen a document whose cache has been wiped', async function () {
+    it('can reopen a document whose cache has been wiped', async function () {
+      return withClock(async (clock) => {
+        const api = await home.createHomeApi('chimpy', org);
+        const ws = await api.newWorkspace({name: 'ws-test-cache'}, 'current');
+        const doc = await api.newDoc({ name: 'doc-reopened-after-cache-purge' }, ws);
+        const docApi = api.getDocAPI(doc);
+        const aValue = 42;
+        const table1Content = {A: [aValue]};
+        await docApi.addRows('Table1', table1Content);
+        await docApi.flush(); // Flush the changes to the remote storage
+        console.log('row added');
+        assert.isTrue(isFileInCache(doc), 'the document should exist in cache');
 
+        // Delete the cache
+        await clock.runToLastAsync();
+        await clock.tickAsync(CUSTOM_CLEANUP_CACHE_PERIOD_MS + 1);
+        await keeper.cleanupCache();
+        await clock.runToLastAsync();
+
+        assert.isFalse(isFileInCache(doc), 'the document cache should have been purged');
+
+        await setTimeout(1000);
+        console.log("RESUME");
+        const fetchedContent = await docApi.getRecords("Table1");
+        assert.isTrue(isFileInCache(doc), 'the document cache should be retrieved after fetching its content');
+        assert.deepEqual(fetchedContent[0].fields.A, aValue,
+          'the content fetched should be the same as the one we put earlier');
+      });
     });
   });
 });

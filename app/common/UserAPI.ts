@@ -512,6 +512,7 @@ export interface DocAPI {
   // be empty), or all but the current snapshot.
   removeSnapshots(snapshotIds: string[] | 'unlisted' | 'past'): Promise<{snapshotIds: string[]}>;
   forceReload(): Promise<void>;
+  flush(): Promise<void>;
   recover(recoveryMode: boolean): Promise<void>;
   // Compare two documents, optionally including details of the changes.
   compareDoc(
@@ -1121,6 +1122,12 @@ export class DocAPIImpl extends BaseAPI implements DocAPI {
 
   public async forceReload(): Promise<void> {
     await this.request(`${this._url}/force-reload`, {
+      method: 'POST'
+    });
+  }
+
+  public async flush(): Promise<void> {
+    await this.request(`${this._url}/flush`, {
       method: 'POST'
     });
   }
