@@ -4143,16 +4143,28 @@ describe('GranularAccess', function() {
     it('respects aclAsUser', async function() {
       await freshDoc();
       async function getPayload() {
-        const tokenResult: AccessTokenResult = (await cliOwner.send('getAccessToken', 0, {})).data;
+        const tokenResult: AccessTokenResult = (await cliOwner.send('getAccessToken', 0, {readOnly: false})).data;
         const token = tokenResult.token;
         const payload: any = jwt.decode(token);
-        return payload;
+        return {payload, token};
       }
 
-      const ownerPayload = await getPayload();
+      const {payload: ownerPayload} = await getPayload();
       await reopenClients({linkParameters: {aclAsUser: 'charon@getgrist.com'}});
-      const aclPayload = await getPayload();
+      const {payload: aclPayload, token} = await getPayload();
       assert(aclPayload.userId != ownerPayload.userId);
+
+      await owner.applyUserActions(docId, [
+        ['AddTable', 'Data1', [{id: 'Docs', type: 'Attachments'}]],
+        ['AddRecord', 'Data1', null, {}],
+        ['AddRecord', '_grist_ACLResources', -1, {tableId: 'Data1', colIds: '*'}],
+      ])
+
+      const i7 = await postAttachment(owner, docId, token, "data7", "7.txt")
+      await assert.isFulfilled(getAttachment(owner, docId, i7));
+      await assert.isFulfilled(getAttachment(editor, docId, i7));
+      await editor.getDocAPI(docId).updateRows('Data1', {id: [1], Docs: [[GristObjCode.List, i7]]});
+      await assert.isFulfilled(getAttachment(editor, docId, i7));
     });
   });
 });
