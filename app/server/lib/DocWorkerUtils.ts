@@ -2,11 +2,13 @@ import {ApiError} from 'app/common/ApiError';
 import {parseSubdomainStrictly} from 'app/common/gristUrls';
 import {removeTrailingSlash} from 'app/common/gutil';
 import {DocStatus, DocWorkerInfo, IDocWorkerMap} from 'app/server/lib/DocWorkerMap';
+import {getAssignmentId} from 'app/server/lib/idUtils';
 import log from 'app/server/lib/log';
 import {adaptServerUrl} from 'app/server/lib/requestUtils';
+
 import * as express from 'express';
 import fetch, {Response as FetchResponse, RequestInit} from 'node-fetch';
-import {getAssignmentId} from './idUtils';
+import { TFunction } from 'i18next';
 
 /**
  * This method transforms a doc worker's public url as needed based on the request.
@@ -82,7 +84,8 @@ export async function getWorker(
   docWorkerMap: IDocWorkerMap,
   assignmentId: string,
   urlPath: string,
-  config: RequestInit = {}
+  config: RequestInit = {},
+  t: TFunction,
 ) {
   if (!useWorkerPool()) {
     // This should never happen. We are careful to not use getWorker
@@ -107,7 +110,7 @@ export async function getWorker(
         };
       }
       if (resp.status === 403) {
-        throw new ApiError("You do not have access to this document.", resp.status);
+        throw new ApiError(t("access.docNoAccess"), resp.status);
       }
       if (resp.status !== 404) {
         throw new ApiError(resp.statusText, resp.status);
@@ -154,8 +157,9 @@ export type DocWorkerInfoOrSelfPrefix = {
 
 export async function getDocWorkerInfoOrSelfPrefix(
   docId: string,
+  t: TFunction,
   docWorkerMap?: IDocWorkerMap | null,
-  tag?: string
+  tag?: string,
 ): Promise<DocWorkerInfoOrSelfPrefix> {
   if (!useWorkerPool()) {
     // Let the client know there is not a separate pool of workers,
@@ -174,7 +178,7 @@ export async function getDocWorkerInfoOrSelfPrefix(
     throw new Error('no worker map');
   }
   const assignmentId = getAssignmentId(docWorkerMap, docId);
-  const { docStatus } = await getWorker(docWorkerMap, assignmentId, '/status');
+  const { docStatus } = await getWorker(docWorkerMap, assignmentId, '/status', {}, t);
   if (!docStatus) {
     throw new Error('no worker');
   }

@@ -55,7 +55,7 @@ export function attachAppEndpoint(options: AttachOptions): void {
     res.header("Access-Control-Allow-Credentials", "true");
 
     const {selfPrefix, docWorker} = await getDocWorkerInfoOrSelfPrefix(
-      req.params.docId, docWorkerMap, gristServer.getTag()
+      req.params.docId, req.t.bind(req), docWorkerMap, gristServer.getTag()
     );
     const info: PublicDocWorkerUrlInfo = selfPrefix ?
       { docWorkerUrl: null, docWorkerId: null, selfPrefix } :
@@ -153,7 +153,7 @@ export function attachAppEndpoint(options: AttachOptions): void {
         Accept: 'application/json',
         ...getTransitiveHeaders(req, { includeOrigin: true }),
       };
-      const workerInfo = await getWorker(docWorkerMap, docId, `/${docId}/app.html`, {headers});
+      const workerInfo = await getWorker(docWorkerMap, docId, `/${docId}/app.html`, {headers}, req.t.bind(req));
       docStatus = workerInfo.docStatus;
       body = await workerInfo.resp.json();
     }

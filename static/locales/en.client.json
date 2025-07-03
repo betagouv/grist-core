@@ -2065,5 +2065,11 @@
     "ExternalAttachmentBanner": {
         "Recommendation: {{storageRecommendation}}\nWhen storing large attachments, or many of them, we recommend\nkeeping them in external storage. This document is currently\nusing internal storage for attachments, which keeps it\nself-contained but may limit performance.": "Recommendation: {{storageRecommendation}}\nWhen storing large attachments, or many of them, we recommend\nkeeping them in external storage. This document is currently\nusing internal storage for attachments, which keeps it\nself-contained but may limit performance.",
         "Set the document to use external storage.": "Set the document to use external storage."
+    },
+    "DocWorkerUtils": {
+        "You do not have access to this document.": "You do not have access to this document."
+    },
+    "OIDCConfig": {
+        "oidc.emailNotVerifiedError": "oidc.emailNotVerifiedError"
     }
 }

@@ -500,7 +500,8 @@ export async function fetchDoc(
 
   // Find the doc worker responsible for the document we wish to copy.
   // The backend needs to be well configured for this to work.
-  const { selfPrefix, docWorker } = await getDocWorkerInfoOrSelfPrefix(docId, docWorkerMap, server.getTag());
+  const { selfPrefix, docWorker } = await getDocWorkerInfoOrSelfPrefix(docId, req.t.bind(req),
+    docWorkerMap, server.getTag());
   const docWorkerUrl = docWorker ? docWorker.internalUrl : getUrlFromPrefix(server.getHomeInternalUrl(), selfPrefix);
   const apiBaseUrl = docWorkerUrl.replace(/\/*$/, '/');
 

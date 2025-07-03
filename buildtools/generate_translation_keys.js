@@ -3,14 +3,15 @@
  *
  * This code walk through all the files in client directory and its children
  * Get the all keys called by our makeT utils function
- * And add only the new one on our en.client.json file
+ * And add only the new one on our en.client.json or en.server.json files
  *
  */
 
 const fs = require("fs");
 const path = require("path");
 const Parser = require("i18next-scanner").Parser;
-const englishKeys = require("../static/locales/en.client.json");
+const clientEnglishKeysFile = "static/locales/en.client.json";
+const serverEnglishKeysFile = "static/locales/en.server.json";
 const _ = require("lodash");
 
 const parser = new Parser({
@@ -56,6 +57,7 @@ const getKeysFromFile = (filePath, fileName) => {
     {
       list: [
         "i18next.t",
+        "req.t",
         "t", // To match the file-level t function created with makeT
       ],
     },
@@ -105,7 +107,8 @@ function reportUnrecognizedKeys(originalKeys, foundKeys) {
   return unknowns;
 }
 
-async function walkTranslation(dirs) {
+async function walkTranslation(dirs, englishKeysFilePath) {
+  const englishKeys = require(path.join("..", englishKeysFilePath));
   const originalKeys = _.cloneDeep(englishKeys);
   for await (const p of walk(dirs)) {
     const { name } = path.parse(p);
@@ -116,7 +119,7 @@ async function walkTranslation(dirs) {
   const foundKeys = _.cloneDeep(keys.en.translation);
   const mergeCount = merge(englishKeys, sort(keys.en.translation));
   await fs.promises.writeFile(
-    "static/locales/en.client.json",
+    englishKeysFilePath,
     JSON.stringify(englishKeys, null, 4) + '\n',  // match weblate's default
     "utf-8"
   );
@@ -127,4 +130,5 @@ async function walkTranslation(dirs) {
   console.log(`Make ${mergeCount} merge(s).`);
 }
 
-walkTranslation(["_build/app/client", ...process.argv.slice(2)]);
+walkTranslation(["_build/app/client", ...process.argv.slice(2)], clientEnglishKeysFile);
+walkTranslation(["_build/app/server", ...process.argv.slice(2)], serverEnglishKeysFile);
