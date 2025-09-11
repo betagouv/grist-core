@@ -286,6 +286,170 @@ abstract class BaseFieldRenderer extends Disposable {
   }
 }
 
+abstract class BaseListRenderer extends BaseFieldRenderer {
+  protected ctl?: PopupControl<IPopupOptions>;
+  protected selectElement: HTMLElement;
+  protected radioButtons: MutableObsArray<{
+    label: string;
+    value: string;
+    checked: Observable<string|null>
+  }> = this.autoDispose(obsArray());
+  protected choices: [number|string, CellValue][];
+  protected format = this.field.options.formSelectFormat ?? 'select';
+  protected alignment = this.field.options.formOptionsAlignment ?? 'vertical';
+  protected value: Observable<string>;
+  protected gristTypeAttr: Record<string, string> = {};
+
+  public constructor(field: FormField, context: FormRendererContext, choices: [number|string, CellValue][]) {
+    super(field, context);
+    this.value = Observable.create<string>(this, '');
+    const sortOrder = this.field.options.formOptionsSortOrder ?? 'default';
+    if (sortOrder !== 'default') {
+      // Sort by the second value, which is the display value.
+      choices.sort((a, b) => String(a[1]).localeCompare(String(b[1])));
+      if (sortOrder === 'descending') {
+        choices.reverse();
+      }
+    }
+    this.choices = choices.slice();
+    this.radioButtons.set(this.choices.map(choice => ({
+      label: String(choice[1]),
+      value: String(choice[0]),
+      checked: Observable.create(this, null),
+    })));
+  }
+
+  public fieldDomAttributes() {
+    if (this.format === 'radio') {
+      return {
+        role: 'group',
+        'aria-labelledby': `${this.id()}-label`,
+      };
+    }
+    return {};
+  }
+
+  public input() {
+    if (this.format === 'select') {
+      return this.renderSelectInput();
+    } else {
+      return this.renderRadioInput();
+    }
+  }
+
+  public resetInput() {
+    this.value.set('');
+    this.radioButtons.get().forEach(radioButton => {
+      radioButton.checked.set(null);
+    });
+  }
+
+  protected renderSelectInput() {
+    return css.hybridSelect(
+      this.selectElement = css.select(
+        {
+          name: this.name(),
+          id: this.id(),
+          required: this.field.options.formRequired,
+          ...this.gristTypeAttr
+        },
+        dom.on('input', (_e, elem) => this.value.set(elem.value)),
+        dom('option',
+          {value: ''},
+          selectPlaceholder(),
+          dom.prop('selected', use => use(this.value) === ''),
+        ),
+        this.choices.map((choice) => dom('option',
+          {value: String(choice[0])},
+          String(choice[1]),
+          dom.prop('selected', use => use(this.value) === String(choice[0])),
+        )),
+        dom.onKeyDown({
+          Enter$: (ev) => this.maybeOpenSearchSelect(ev),
+          ' $': (ev) => this.maybeOpenSearchSelect(ev),
+          ArrowUp$: (ev) => this.maybeOpenSearchSelect(ev),
+          ArrowDown$: (ev) => this.maybeOpenSearchSelect(ev),
+          Backspace$: () => this.value.set(''),
+        }),
+        preventSubmitOnEnter(),
+      ),
+      dom.maybe(use => !use(isXSmallScreenObs()), () =>
+        css.searchSelect(
+          css.currentSelectValue(dom.text(use => {
+            const choice = this.choices.find((c) => String(c[0]) === use(this.value));
+            return String(choice?.[1] || selectPlaceholder());
+          })),
+          dropdownWithSearch<string>({
+            action: (value) => this.value.set(value),
+            options: () => this.choices.map((choice) => ({
+              label: String(choice[1]),
+              value: String(choice[0]),
+            })),
+            onClose: () => { setTimeout(() => this.selectElement.focus()); },
+            acOptions: {maxResults: 100, keepOrder: false, showEmptyItems: true},
+            placeholder: 'Search',
+            popupOptions: {
+              trigger: [
+                'click',
+                (_el, ctl) => { this.ctl = ctl; },
+              ],
+            },
+            matchTriggerElemWidth: true,
+          }),
+          css.resetSelectButton(
+            icon('CrossSmall'),
+            dom.attr('aria-label', t('Clear selection for: {{inputLabel}}', {inputLabel: this.field.question})),
+            dom.hide((use) => !use(this.value)),
+            dom.on('click', (ev) => {
+              this.value.set('');
+              this.selectElement.focus();
+              ev.stopPropagation();
+              ev.preventDefault();
+            }),
+            testId('search-select-clear-btn')
+          ),
+          css.searchSelectIcon('Collapse'),
+          testId('search-select'),
+        ),
+      )
+    );
+  }
+
+  protected renderRadioInput() {
+    const required = this.field.options.formRequired;
+    return css.radioList(
+      css.radioList.cls('-horizontal', this.alignment === 'horizontal'),
+      dom.cls('grist-radio-list'),
+      dom.cls('required', Boolean(required)),
+      {name: this.name(), required, ...this.gristTypeAttr},
+      dom.forEach(this.radioButtons, (radioButton) =>
+        css.radio(
+          dom('input',
+            dom.prop('checked', radioButton.checked),
+            dom.on('change', (_e, elem) => radioButton.checked.set(elem.value)),
+            {
+              type: 'radio',
+              name: `${this.name()}`,
+              value: radioButton.value,
+            },
+            preventSubmitOnEnter(),
+          ),
+          dom('span', radioButton.label),
+        )
+      ),
+    );
+  }
+  protected maybeOpenSearchSelect(ev: KeyboardEvent) {
+    if (isXSmallScreenObs().get()) {
+      return;
+    }
+
+    ev.preventDefault();
+    ev.stopPropagation();
+    this.ctl?.open();
+  }
+}
+
 class TextRenderer extends BaseFieldRenderer {
   protected inputType = 'text';
 
@@ -393,161 +557,16 @@ class DateTimeRenderer extends TextRenderer {
 
 export const selectPlaceholder = () => t('Select...');
 
-class ChoiceRenderer extends BaseFieldRenderer  {
-  protected value: Observable<string>;
-
-  private _choices: string[];
-  private _selectElement: HTMLElement;
-  private _ctl?: PopupControl<IPopupOptions>;
-  private _format = this.field.options.formSelectFormat ?? 'select';
-  private _alignment = this.field.options.formOptionsAlignment ?? 'vertical';
-  private _radioButtons: MutableObsArray<{
-    label: string;
-    checked: Observable<string|null>
-  }> = this.autoDispose(obsArray());
+class ChoiceRenderer extends BaseListRenderer  {
+  protected choices: [string, CellValue][];
 
   public constructor(field: FormField, context: FormRendererContext) {
-    super(field, context);
-
-    const choices = this.field.options.choices;
-    if (!Array.isArray(choices) || choices.some((choice) => typeof choice !== 'string')) {
-      this._choices = [];
-    } else {
-      const sortOrder = this.field.options.formOptionsSortOrder ?? 'default';
-      if (sortOrder !== 'default') {
-        choices.sort((a, b) => String(a).localeCompare(String(b)));
-        if (sortOrder === 'descending') {
-          choices.reverse();
-        }
-      }
-      this._choices = choices.slice();
-    }
-
-    this.value = Observable.create<string>(this, '');
-
-    this._radioButtons.set(this._choices.map(choice => ({
-      label: String(choice),
-      checked: Observable.create(this, null),
-    })));
-  }
-
-  public fieldDomAttributes() {
-    if (this._format === 'radio') {
-      return {
-        role: 'group',
-        'aria-labelledby': `${this.id()}-label`,
-      };
-    }
-    return {};
-  }
-
-  public input() {
-    if (this._format === 'select') {
-      return this._renderSelectInput();
-    } else {
-      return this._renderRadioInput();
-    }
-  }
-
-  public resetInput() {
-    this.value.set('');
-    this._radioButtons.get().forEach(radioButton => {
-      radioButton.checked.set(null);
-    });
-  }
-
-  private _renderSelectInput() {
-    return css.hybridSelect(
-      this._selectElement = css.select(
-        {name: this.name(), id: this.id(), required: this.field.options.formRequired},
-        dom.on('input', (_e, elem) => this.value.set(elem.value)),
-        dom('option', {value: ''}, selectPlaceholder()),
-        this._choices.map((choice) => dom('option',
-          {value: choice},
-          dom.prop('selected', use => use(this.value) === choice),
-          choice
-        )),
-        dom.onKeyDown({
-          Enter$: (ev) => this._maybeOpenSearchSelect(ev),
-          ' $': (ev) => this._maybeOpenSearchSelect(ev),
-          ArrowUp$: (ev) => this._maybeOpenSearchSelect(ev),
-          ArrowDown$: (ev) => this._maybeOpenSearchSelect(ev),
-          Backspace$: () => this.value.set(''),
-        }),
-        preventSubmitOnEnter(),
-      ),
-      dom.maybe(use => !use(isXSmallScreenObs()), () =>
-        css.searchSelect(
-          css.currentSelectValue(dom.text(use => use(this.value) || selectPlaceholder())),
-          dropdownWithSearch<string>({
-            action: (value) => this.value.set(value),
-            options: () => this._choices.map((choice) => ({
-              label: choice,
-              value: choice,
-            })),
-            onClose: () => { setTimeout(() => this._selectElement.focus()); },
-            placeholder: t('Search'),
-            acOptions: {maxResults: 100, keepOrder: false, showEmptyItems: true},
-            popupOptions: {
-              trigger: [
-                'click',
-                (_el, ctl) => { this._ctl = ctl; },
-              ],
-            },
-            matchTriggerElemWidth: true,
-          }),
-          css.resetSelectButton(
-            icon('CrossSmall'),
-            dom.attr('aria-label', t('Clear selection for: {{inputLabel}}', {inputLabel: this.field.question})),
-            dom.hide((use) => !use(this.value)),
-            dom.on('click', (ev) => {
-              this.value.set('');
-              this._selectElement.focus();
-              ev.stopPropagation();
-              ev.preventDefault();
-            }),
-            testId('search-select-clear-btn')
-          ),
-          css.searchSelectIcon('Collapse'),
-          testId('search-select'),
-        ),
-      ),
-    );
-  }
-
-  private _renderRadioInput() {
-    const required = this.field.options.formRequired;
-    return css.radioList(
-      css.radioList.cls('-horizontal', this._alignment === 'horizontal'),
-      dom.cls('grist-radio-list'),
-      dom.cls('required', Boolean(required)),
-      {name: this.name(), required},
-      dom.forEach(this._radioButtons, (radioButton) =>
-        css.radio(
-          dom('input',
-            dom.prop('checked', radioButton.checked),
-            dom.on('change', (_e, elem) => radioButton.checked.set(elem.value)),
-            {
-              type: 'radio',
-              name: `${this.name()}`,
-              value: radioButton.label,
-            },
-            preventSubmitOnEnter(),
-          ),
-          dom('span', radioButton.label),
-        )
-      ),
-    );
-  }
-
-  private _maybeOpenSearchSelect(ev: KeyboardEvent) {
-    if (isXSmallScreenObs().get()) {
-      return;
-    }
-
-    ev.preventDefault();
-    ev.stopPropagation();
-    this._ctl?.open();
+    const choices = field.options.choices;
+    const normalizedChoices: [string, CellValue][] =
+      !Array.isArray(choices) || choices.some((choice) => typeof choice !== 'string') ?
+      [] :
+      choices.map(choice => [choice, choice]);
+    super(field, context, normalizedChoices);
   }
 }
 
@@ -750,173 +769,10 @@ class RefListRenderer extends BaseFieldRenderer {
   }
 }
 
-class RefRenderer extends BaseFieldRenderer {
-  protected value = Observable.create(this, '');
-
-  private _format = this.field.options.formSelectFormat ?? 'select';
-  private _alignment = this.field.options.formOptionsAlignment ?? 'vertical';
-  private _choices: [number|string, CellValue][];
-  private _selectElement: HTMLElement;
-  private _ctl?: PopupControl<IPopupOptions>;
-  private _radioButtons: MutableObsArray<{
-    label: string;
-    value: string;
-    checked: Observable<string|null>
-  }> = this.autoDispose(obsArray());
-
+class RefRenderer extends BaseListRenderer {
   public constructor(field: FormField, context: FormRendererContext) {
-    super(field, context);
-
-    const choices: [number|string, CellValue][] = this.field.refValues ?? [];
-    const sortOrder = this.field.options.formOptionsSortOrder ?? 'default';
-    if (sortOrder !== 'default') {
-      // Sort by the second value, which is the display value.
-      choices.sort((a, b) => String(a[1]).localeCompare(String(b[1])));
-      if (sortOrder === 'descending') {
-        choices.reverse();
-      }
-    }
-    this._choices = choices.slice();
-
-    this.value = Observable.create<string>(this, '');
-
-    this._radioButtons.set(this._choices.map(reference => ({
-      label: String(reference[1]),
-      value: String(reference[0]),
-      checked: Observable.create(this, null),
-    })));
-  }
-
-
-  public fieldDomAttributes() {
-    if (this._format === 'radio') {
-      return {
-        role: 'group',
-        'aria-labelledby': `${this.id()}-label`,
-      };
-    }
-    return {};
-  }
-
-  public input() {
-    if (this._format === 'select') {
-      return this._renderSelectInput();
-    } else {
-      return this._renderRadioInput();
-    }
-  }
-
-  public resetInput(): void {
-    this.value.set('');
-    this._radioButtons.get().forEach(radioButton => {
-      radioButton.checked.set(null);
-    });
-  }
-
-  private _renderSelectInput() {
-    return css.hybridSelect(
-      this._selectElement = css.select(
-        {
-          name: this.name(),
-          id: this.id(),
-          'data-grist-type': this.field.type,
-          required: this.field.options.formRequired,
-        },
-        dom.on('input', (_e, elem) => this.value.set(elem.value)),
-        dom('option',
-          {value: ''},
-          selectPlaceholder(),
-          dom.prop('selected', use => use(this.value) === ''),
-        ),
-        this._choices.map((choice) => dom('option',
-          {value: String(choice[0])},
-          String(choice[1]),
-          dom.prop('selected', use => use(this.value) === String(choice[0])),
-        )),
-        dom.onKeyDown({
-          Enter$: (ev) => this._maybeOpenSearchSelect(ev),
-          ' $': (ev) => this._maybeOpenSearchSelect(ev),
-          ArrowUp$: (ev) => this._maybeOpenSearchSelect(ev),
-          ArrowDown$: (ev) => this._maybeOpenSearchSelect(ev),
-          Backspace$: () => this.value.set(''),
-        }),
-        preventSubmitOnEnter(),
-      ),
-      dom.maybe(use => !use(isXSmallScreenObs()), () =>
-        css.searchSelect(
-          css.currentSelectValue(dom.text(use => {
-            const choice = this._choices.find((c) => String(c[0]) === use(this.value));
-            return String(choice?.[1] || selectPlaceholder());
-          })),
-          dropdownWithSearch<string>({
-            action: (value) => this.value.set(value),
-            options: () => this._choices.map((choice) => ({
-              label: String(choice[1]),
-              value: String(choice[0]),
-            })),
-            onClose: () => { setTimeout(() => this._selectElement.focus()); },
-            acOptions: {maxResults: 100, keepOrder: false, showEmptyItems: true},
-            placeholder: 'Search',
-            popupOptions: {
-              trigger: [
-                'click',
-                (_el, ctl) => { this._ctl = ctl; },
-              ],
-            },
-            matchTriggerElemWidth: true,
-          }),
-          css.resetSelectButton(
-            icon('CrossSmall'),
-            dom.attr('aria-label', t('Clear selection for: {{inputLabel}}', {inputLabel: this.field.question})),
-            dom.hide((use) => !use(this.value)),
-            dom.on('click', (ev) => {
-              this.value.set('');
-              this._selectElement.focus();
-              ev.stopPropagation();
-              ev.preventDefault();
-            }),
-            testId('search-select-clear-btn')
-          ),
-          css.searchSelectIcon('Collapse'),
-          testId('search-select'),
-        ),
-      )
-    );
-  }
-
-  private _renderRadioInput() {
-    const required = this.field.options.formRequired;
-    return css.radioList(
-      css.radioList.cls('-horizontal', this._alignment === 'horizontal'),
-      dom.cls('grist-radio-list'),
-      dom.cls('required', Boolean(required)),
-      {name: this.name(), required, 'data-grist-type': this.field.type},
-      dom.forEach(this._radioButtons, (radioButton) =>
-        css.radio(
-          dom('input',
-            dom.prop('checked', radioButton.checked),
-            dom.on('change', (_e, elem) => radioButton.checked.set(elem.value)),
-            {
-              type: 'radio',
-              name: `${this.name()}`,
-              value: radioButton.value,
-            },
-            preventSubmitOnEnter(),
-          ),
-          dom('span', radioButton.label),
-        )
-      ),
-    );
-  }
-
-  private _maybeOpenSearchSelect(ev: KeyboardEvent) {
-    if (isXSmallScreenObs().get()) {
-      return;
-    }
-
-    ev.preventDefault();
-    ev.stopPropagation();
-    this._ctl?.open();
+    super(field, context, field.refValues ?? []);
+    this.gristTypeAttr = {"data-grist-type": this.field.type};
   }
 }
 
