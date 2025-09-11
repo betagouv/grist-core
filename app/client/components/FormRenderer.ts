@@ -286,7 +286,7 @@ abstract class BaseFieldRenderer extends Disposable {
   }
 }
 
-abstract class BaseListRenderer extends BaseFieldRenderer {
+abstract class BaseListRenderer<ChoiceT> extends BaseFieldRenderer {
   protected ctl?: PopupControl<IPopupOptions>;
   protected selectElement: HTMLElement;
   protected radioButtons: MutableObsArray<{
@@ -294,27 +294,27 @@ abstract class BaseListRenderer extends BaseFieldRenderer {
     value: string;
     checked: Observable<string|null>
   }> = this.autoDispose(obsArray());
-  protected choices: [number|string, CellValue][];
+  protected choices: ChoiceT[];
   protected format = this.field.options.formSelectFormat ?? 'select';
   protected alignment = this.field.options.formOptionsAlignment ?? 'vertical';
   protected value: Observable<string>;
   protected gristTypeAttr: Record<string, string> = {};
 
-  public constructor(field: FormField, context: FormRendererContext, choices: [number|string, CellValue][]) {
+  public constructor(field: FormField, context: FormRendererContext, choices: ChoiceT[]) {
     super(field, context);
     this.value = Observable.create<string>(this, '');
     const sortOrder = this.field.options.formOptionsSortOrder ?? 'default';
+    this.choices = choices;
     if (sortOrder !== 'default') {
       // Sort by the second value, which is the display value.
-      choices.sort((a, b) => String(a[1]).localeCompare(String(b[1])));
+      this.choices.sort(this.sortChoices);
       if (sortOrder === 'descending') {
-        choices.reverse();
+        this.choices.reverse();
       }
     }
-    this.choices = choices.slice();
-    this.radioButtons.set(this.choices.map(choice => ({
-      label: String(choice[1]),
-      value: String(choice[0]),
+    this.radioButtons.set(this.mapChoices(({value, label}) => ({
+      label,
+      value,
       checked: Observable.create(this, null),
     })));
   }
@@ -344,6 +344,10 @@ abstract class BaseListRenderer extends BaseFieldRenderer {
     });
   }
 
+  protected abstract sortChoices(a: ChoiceT, b: ChoiceT): number;
+  protected abstract mapChoices<T>(cb: (arg: {value: string, label: string}) => T): T[];
+  protected abstract getSelectedLabel(search: string): string;
+
   protected renderSelectInput() {
     return css.hybridSelect(
       this.selectElement = css.select(
@@ -359,10 +363,10 @@ abstract class BaseListRenderer extends BaseFieldRenderer {
           selectPlaceholder(),
           dom.prop('selected', use => use(this.value) === ''),
         ),
-        this.choices.map((choice) => dom('option',
-          {value: String(choice[0])},
-          String(choice[1]),
-          dom.prop('selected', use => use(this.value) === String(choice[0])),
+        this.mapChoices(({value, label}) => dom('option',
+          {value},
+          label,
+          dom.prop('selected', use => use(this.value) === value),
         )),
         dom.onKeyDown({
           Enter$: (ev) => this.maybeOpenSearchSelect(ev),
@@ -375,15 +379,12 @@ abstract class BaseListRenderer extends BaseFieldRenderer {
       ),
       dom.maybe(use => !use(isXSmallScreenObs()), () =>
         css.searchSelect(
-          css.currentSelectValue(dom.text(use => {
-            const choice = this.choices.find((c) => String(c[0]) === use(this.value));
-            return String(choice?.[1] || selectPlaceholder());
-          })),
+          css.currentSelectValue(dom.text(use => this.getSelectedLabel(use(this.value)))),
           dropdownWithSearch<string>({
             action: (value) => this.value.set(value),
-            options: () => this.choices.map((choice) => ({
-              label: String(choice[1]),
-              value: String(choice[0]),
+            options: () => this.mapChoices(({value, label}) => ({
+              label,
+              value,
             })),
             onClose: () => { setTimeout(() => this.selectElement.focus()); },
             acOptions: {maxResults: 100, keepOrder: false, showEmptyItems: true},
@@ -557,16 +558,25 @@ class DateTimeRenderer extends TextRenderer {
 
 export const selectPlaceholder = () => t('Select...');
 
-class ChoiceRenderer extends BaseListRenderer  {
-  protected choices: [string, CellValue][];
-
+class ChoiceRenderer extends BaseListRenderer<string> {
   public constructor(field: FormField, context: FormRendererContext) {
     const choices = field.options.choices;
-    const normalizedChoices: [string, CellValue][] =
+    const normalizedChoices: string[] =
       !Array.isArray(choices) || choices.some((choice) => typeof choice !== 'string') ?
       [] :
-      choices.map(choice => [choice, choice]);
+      choices;
     super(field, context, normalizedChoices);
+  }
+  protected sortChoices(a: string, b: string) {
+    return String(a).localeCompare(String(b));
+  }
+
+  protected mapChoices<T>(cb: (arg: {value: string, label: string}) => T): T[] {
+    return this.choices.map((val) => cb({value: val, label: val}));
+  }
+
+  protected getSelectedLabel(valToSearch: string): string {
+    return valToSearch || selectPlaceholder();
   }
 }
 
@@ -769,10 +779,24 @@ class RefListRenderer extends BaseFieldRenderer {
   }
 }
 
-class RefRenderer extends BaseListRenderer {
+class RefRenderer extends BaseListRenderer<[number, CellValue]> {
   public constructor(field: FormField, context: FormRendererContext) {
-    super(field, context, field.refValues ?? []);
+    const choices = field.refValues ?? [];
+    super(field, context, choices);
     this.gristTypeAttr = {"data-grist-type": this.field.type};
+  }
+
+  protected sortChoices(a: [number, CellValue], b: [number, CellValue]) {
+    return String(a[1]).localeCompare(String(b[1] as unknown));
+  }
+
+  protected mapChoices<T>(cb: (arg: {value: string, label: string}) => T): T[] {
+    return this.choices.map(([val, label]) => cb({value: String(val), label: String(label)}));
+  }
+
+  protected getSelectedLabel(valToSearch: string): string {
+    const choice = this.choices.find((c) => String(c[0]) === valToSearch);
+    return String(choice?.[1] || selectPlaceholder());
   }
 }
 
