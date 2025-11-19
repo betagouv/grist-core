@@ -60,7 +60,7 @@ module.exports = {
         loader: 'esbuild-loader',
         options: {
           loader: 'ts',
-          target: 'es2017',
+          target: 'es2021',
           sourcemap: true,
         },
         exclude: /node_modules/
