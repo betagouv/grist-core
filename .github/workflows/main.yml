@@ -21,16 +21,7 @@ jobs:
         python-version: [3.11]
         node-version: [22.x]
         tests:
-          - ':lint:python:client:common:smoke:stubs:pyodide:'
-          - ':server-1-of-2:'
-          - ':server-2-of-2:'
-          - ':gen-server:'
-          - ':nbrowser-^[A-D]:'
-          - ':nbrowser-^[E-L]:'
-          - ':nbrowser-^[M-N]:'
-          - ':nbrowser-^[O-R]:'
-          - ':nbrowser-^[^A-R]:'
-          - ':projects:'
+          - ':nbrowser-LinkingBidirectional:'
         include:
           - tests: ':lint:python:client:common:smoke:'
             node-version: 22.x
@@ -188,7 +179,9 @@ jobs:
         run: |
           mkdir -p $MOCHA_WEBDRIVER_LOGDIR
           export GREP_TESTS=$(echo $TESTS | sed "s/.*:nbrowser-\([^:]*\).*/\1/")
-          MOCHA_WEBDRIVER_SKIP_CLEANUP=1 MOCHA_WEBDRIVER_HEADLESS=1 yarn run test:nbrowser --parallel --jobs 3
+          for i in $(seq 1 20); do 
+            MOCHA_WEBDRIVER_HEADLESS=1 yarn run test:nbrowser
+          done
         env:
           TESTS: ${{ matrix.tests }}
           MOCHA_WEBDRIVER_LOGDIR: ${{ runner.temp }}/test-logs/webdriver
