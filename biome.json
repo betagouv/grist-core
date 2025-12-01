@@ -1,0 +1,119 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.3.8/schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "useIgnoreFile": true },
+  "files": {
+    "ignoreUnknown": false,
+    "includes": [
+      "**",
+      "!!**/tsconfig-*.json",
+      "!!test/fixtures/plugins/builtInPlugins/plugins/wrong-json/manifest.json",
+      "!!sandbox/grist/testscript.json",
+      "!!test/fixtures/plugins/browserInstalledPlugins/plugins/custom-section/*"
+    ]
+  },
+  "formatter": { "enabled": true, "indentStyle": "space" },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": false,
+      "correctness": { "noUnusedVariables": "error" },
+      "suspicious": { "noPrototypeBuiltins": "off" }
+    },
+    "includes": [
+      "**",
+      "static/**/*.js",
+      "**/*-ti.ts",
+      "!./*",
+      "app",
+      "test",
+      "plugins",
+      "buildtools",
+      "stubs",
+      ".eslintrc.js",
+      "!!**/*.html",
+      "!./plugins/**/dist"
+    ]
+  },
+  "javascript": { "formatter": { "quoteStyle": "double" } },
+  "overrides": [
+    {
+      "includes": ["**/*.ts"],
+      "javascript": { "globals": ["Promise"] },
+      "linter": {
+        "rules": {
+          "complexity": {
+            "noArguments": "off",
+            "noBannedTypes": "off",
+            "noUselessThisAlias": "off"
+          },
+          "correctness": {
+            "noInnerDeclarations": "off",
+            "noUndeclaredVariables": "off",
+            "noUnusedVariables": {
+              "level": "error",
+              "options": {
+                "ignoreRestSiblings": true
+              }
+            }
+          },
+          "nursery": {
+            "noMisusedPromises": "error",
+            "noShadow": "off",
+            "useExplicitType": "off"
+          },
+          "style": {
+            "noInferrableTypes": "off",
+            "noNamespace": "off",
+            "noNonNullAssertion": "off",
+            "noRestrictedImports": "error",
+            "useBlockStatements": "warn",
+            "useConsistentMemberAccessibility": {
+              "level": "error",
+              "options": {
+                "accessibility": "explicit"
+              }
+            },
+            "useNamingConvention": {
+              "level": "warn",
+              "options": {
+                "strictCase": false,
+                "requireAscii": false,
+                "conventions": [
+                  {
+                    "selector": {
+                      "kind": "classMember",
+                      "modifiers": ["private"]
+                    },
+                    "match": "_(.+)"
+                  },
+                  {
+                    "selector": {
+                      "kind": "objectLiteralProperty"
+                    },
+                    "formats": [
+                      "camelCase",
+                      "CONSTANT_CASE",
+                      "PascalCase",
+                      "snake_case"
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "suspicious": {
+            "noConsole": "off",
+            "noEmptyBlockStatements": "off",
+            "noExplicitAny": "off",
+            "noPrototypeBuiltins": "off",
+            "useAwait": "off"
+          }
+        }
+      }
+    }
+  ],
+  "assist": {
+    "enabled": true,
+    "actions": { "source": { "organizeImports": "on" } }
+  }
+}
