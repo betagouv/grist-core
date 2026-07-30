@@ -1,4 +1,4 @@
-import { RequestWithLogin } from "app/server/lib/Authorizer";
+import { RequestWithLogin, signInStatusCookieName } from "app/server/lib/Authorizer";
 import { SessionObj } from "app/server/lib/BrowserSession";
 import log from "app/server/lib/log";
 import { OIDCBuilder } from "app/server/lib/OIDCConfig";
@@ -439,6 +439,260 @@ describe("OIDCConfig", () => {
         assert.isTrue(clientStub.authorizationUrl.calledOnce);
         assert.deepEqual(clientStub.authorizationUrl.firstCall.args, ctx.expectedCalledWith);
         assert.deepEqual(session, ctx.expectedSession);
+      });
+    });
+  });
+
+  describe("silent login", () => {
+    const FAKE_STATE = "fake-state";
+    const FAKE_CODE_VERIFIER = "fake-code-verifier";
+    const SILENT_LOGIN_ENDPOINT = "/oauth2/silent-login";
+    const ATTEMPTED_COOKIE = "grist_oidc_silent_login_attempted";
+    const ORIGIN = "http://localhost:8484";
+
+    let fakeRes: {
+      redirect: Sinon.SinonStub;
+      cookie: Sinon.SinonStub;
+    };
+
+    beforeEach(() => {
+      sandbox.stub(generators, "state").returns(FAKE_STATE);
+      sandbox.stub(generators, "codeVerifier").returns(FAKE_CODE_VERIFIER);
+      fakeRes = {
+        redirect: Sinon.stub(),
+        cookie: Sinon.stub(),
+      };
+    });
+
+    function setEnvVarsWithSilentLogin() {
+      setEnvVars();
+      process.env.GRIST_OIDC_SP_ENABLE_SILENT_LOGIN = "true";
+    }
+
+    function makeNavigationRequest(overrides: object = {}) {
+      return {
+        method: "GET",
+        path: "/some/doc",
+        originalUrl: "/some/doc?x=1",
+        headers: {
+          "accept": "text/html,application/xhtml+xml",
+          "host": "localhost:8484",
+          "sec-fetch-dest": "document",
+        },
+        query: {},
+        ...overrides,
+      } as unknown as express.Request;
+    }
+
+    describe("getSilentLoginMiddleware", () => {
+      it("should return no middleware when GRIST_OIDC_SP_ENABLE_SILENT_LOGIN is not set", async () => {
+        setEnvVars();
+        const config = await OIDCConfigStubbed.buildWithStub();
+        assert.isEmpty(config.getSilentLoginMiddleware());
+      });
+
+      it("should redirect anonymous page navigations to the silent login endpoint", async () => {
+        setEnvVarsWithSilentLogin();
+        const config = await OIDCConfigStubbed.buildWithStub();
+        const [middleware] = config.getSilentLoginMiddleware();
+        const next = Sinon.stub();
+        middleware(makeNavigationRequest(), fakeRes as unknown as express.Response, next);
+        assert.isFalse(next.called);
+        assert.deepEqual(fakeRes.redirect.firstCall.args, [
+          `${SILENT_LOGIN_ENDPOINT}?next=${encodeURIComponent(`${ORIGIN}/some/doc?x=1`)}`,
+        ]);
+      });
+
+      [
+        {
+          itMsg: "the request is not a GET",
+          reqOverrides: { method: "POST" },
+        },
+        {
+          itMsg: "the request does not accept html",
+          reqOverrides: {
+            headers: { "accept": "application/json", "host": "localhost:8484", "sec-fetch-dest": "document" },
+          },
+        },
+        {
+          itMsg: "the request is not a top-level navigation",
+          reqOverrides: {
+            headers: { "accept": "text/html", "host": "localhost:8484", "sec-fetch-dest": "iframe" },
+          },
+        },
+        {
+          itMsg: "the request is for an auth endpoint",
+          reqOverrides: { path: "/oauth2/callback" },
+        },
+        {
+          itMsg: "the request is for the login page",
+          reqOverrides: { path: "/login" },
+        },
+        {
+          itMsg: "the request is for the login page of an org encoded in the path",
+          reqOverrides: { path: "/o/myorg/signin" },
+        },
+        {
+          itMsg: "the request is for the signed-out page",
+          reqOverrides: { path: "/signed-out" },
+        },
+        {
+          itMsg: "the user is already signed in",
+          reqOverrides: {
+            headers: {
+              accept: "text/html",
+              host: "localhost:8484",
+              cookie: `${signInStatusCookieName}=S`,
+            },
+          },
+        },
+        {
+          itMsg: "a silent login was already attempted recently",
+          reqOverrides: {
+            headers: {
+              accept: "text/html",
+              host: "localhost:8484",
+              cookie: `${ATTEMPTED_COOKIE}=1`,
+            },
+          },
+        },
+      ].forEach((ctx) => {
+        it(`should pass the request through when ${ctx.itMsg}`, async () => {
+          setEnvVarsWithSilentLogin();
+          const config = await OIDCConfigStubbed.buildWithStub();
+          const [middleware] = config.getSilentLoginMiddleware();
+          const next = Sinon.stub();
+          middleware(makeNavigationRequest(ctx.reqOverrides), fakeRes as unknown as express.Response, next);
+          assert.isTrue(next.calledOnce);
+          assert.isFalse(fakeRes.redirect.called);
+        });
+      });
+    });
+
+    describe("handleSilentLogin", () => {
+      it("should mark the attempt in a cookie and redirect to the IdP with prompt=none", async () => {
+        setEnvVarsWithSilentLogin();
+        const clientStub = new ClientStub();
+        const config = await OIDCConfigStubbed.buildWithStub(clientStub.asClient());
+        const session = {};
+        const req = makeNavigationRequest({
+          session,
+          query: { next: `${ORIGIN}/some/doc?x=1` },
+        });
+        await config.handleSilentLogin(req, fakeRes as unknown as express.Response);
+        assert.equal(fakeRes.cookie.firstCall.args[0], ATTEMPTED_COOKIE);
+        assert.deepEqual(fakeRes.redirect.firstCall.args, [ClientStub.FAKE_REDIRECT_URL]);
+        assert.isTrue(clientStub.authorizationUrl.calledOnce);
+        assert.include(clientStub.authorizationUrl.firstCall.args[0], { prompt: "none" });
+        assert.deepEqual(session, {
+          oidc: {
+            targetUrl: `${ORIGIN}/some/doc?x=1`,
+            silentLogin: true,
+            code_verifier: FAKE_CODE_VERIFIER,
+            state: FAKE_STATE,
+          },
+        });
+      });
+
+      it("should refuse a cross-origin \"next\" url and use the origin instead", async () => {
+        setEnvVarsWithSilentLogin();
+        const clientStub = new ClientStub();
+        const config = await OIDCConfigStubbed.buildWithStub(clientStub.asClient());
+        const session: { oidc?: { targetUrl?: string } } = {};
+        const req = makeNavigationRequest({
+          session,
+          query: { next: "https://evil.example.com/phishing" },
+        });
+        await config.handleSilentLogin(req, fakeRes as unknown as express.Response);
+        assert.equal(session.oidc?.targetUrl, `${ORIGIN}/`);
+      });
+
+      it("should redirect to the target url when forging the auth url fails", async () => {
+        setEnvVarsWithSilentLogin();
+        const config = await OIDCConfigStubbed.buildWithStub();
+        // No session on the request: forging the auth url should fail.
+        const req = makeNavigationRequest({ query: { next: "/some/doc" } });
+        await config.handleSilentLogin(req, fakeRes as unknown as express.Response);
+        assert.isTrue(logWarnStub.calledOnce);
+        assert.match(logWarnStub.firstCall.args[0], /failed to initiate silent login/);
+        assert.deepEqual(fakeRes.redirect.firstCall.args, [`${ORIGIN}/some/doc`]);
+      });
+    });
+
+    describe("handleCallback", () => {
+      const TARGET_URL = `${ORIGIN}/some/doc`;
+      const SILENT_SESSION = {
+        oidc: {
+          code_verifier: FAKE_CODE_VERIFIER,
+          state: FAKE_STATE,
+          targetUrl: TARGET_URL,
+          silentLogin: true,
+        },
+      } as SessionObj;
+
+      let sendAppPageStub: Sinon.SinonStub;
+      let fakeSessions: { getOrCreateSessionFromRequest: Sinon.SinonStub };
+
+      beforeEach(() => {
+        sendAppPageStub = Sinon.stub().resolves();
+        fakeSessions = {
+          getOrCreateSessionFromRequest: Sinon.stub().returns({
+            operateOnScopedSession: Sinon.stub().resolves(),
+          }),
+        };
+      });
+
+      async function runCallback(session: SessionObj, clientStub: ClientStub) {
+        const config = await OIDCConfigStubbed.build(
+          sendAppPageStub as SendAppPageFunction, undefined, clientStub.asClient(),
+        );
+        const req = {
+          session,
+          t: (key: string) => key,
+        } as unknown as express.Request;
+        clientStub.callbackParams.returns({ state: FAKE_STATE });
+        await config.handleCallback(
+          fakeSessions as unknown as Sessions,
+          req,
+          fakeRes as unknown as express.Response,
+        );
+        return session;
+      }
+
+      it("should quietly redirect to the target url when the IdP requires a login", async () => {
+        setEnvVarsWithSilentLogin();
+        const clientStub = new ClientStub();
+        clientStub.callback.rejects(new OIDCError.OPError({ error: "login_required" }));
+        const session = await runCallback(_.cloneDeep(SILENT_SESSION), clientStub);
+        assert.isFalse(logErrorStub.called, "no error should be logged");
+        assert.isFalse(sendAppPageStub.called, "no error page should be shown");
+        assert.deepEqual(fakeRes.redirect.firstCall.args, [TARGET_URL]);
+        assert.isUndefined(session.oidc, "the OIDC session info should have been cleared");
+        assert.isTrue(logInfoStub.calledWithMatch(/silent login failed \(login_required\)/));
+      });
+
+      it("should quietly redirect and log a warning on unexpected errors", async () => {
+        setEnvVarsWithSilentLogin();
+        const clientStub = new ClientStub();
+        clientStub.callback.rejects(new Error("something went wrong"));
+        const session = await runCallback(_.cloneDeep(SILENT_SESSION), clientStub);
+        assert.isFalse(logErrorStub.called, "no error should be logged");
+        assert.isFalse(sendAppPageStub.called, "no error page should be shown");
+        assert.isTrue(logWarnStub.calledWithMatch(/silent login attempt failed/));
+        assert.deepEqual(fakeRes.redirect.firstCall.args, [TARGET_URL]);
+        assert.isUndefined(session.oidc);
+      });
+
+      it("should log the user in normally when the silent login succeeds", async () => {
+        setEnvVarsWithSilentLogin();
+        const clientStub = new ClientStub();
+        clientStub.callback.resolves({ id_token: "id_token" });
+        clientStub.userinfo.returns({ email: "fake-email", name: "fake-name", email_verified: true });
+        const session = await runCallback(_.cloneDeep(SILENT_SESSION), clientStub);
+        assert.isFalse(logErrorStub.called, "no error should be logged. Got: " + logErrorStub.firstCall?.args[0]);
+        assert.isFalse(sendAppPageStub.called);
+        assert.deepEqual(fakeRes.redirect.firstCall.args, [TARGET_URL]);
+        assert.deepEqual(session, { oidc: { idToken: "id_token" } } as SessionObj);
       });
     });
   });

@@ -37,6 +37,7 @@ export function readGetGristComConfigFromSettings(settings: AppSettings): OIDCCo
     ignoreEmailVerified: false,
     extraMetadata: {},
     enabledProtections: new Set(["PKCE", "STATE"]),
+    enableSilentLogin: false,
   };
 
   return config;

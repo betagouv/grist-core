@@ -50,6 +50,13 @@
  *    env GRIST_OIDC_SP_HTTP_TIMEOUT
  *        The timeout in milliseconds for HTTP requests to the IdP. The default value is set to 3500 by the
  *        openid-client library. See: https://github.com/panva/node-openid-client/blob/main/docs/README.md#customizing-http-requests
+ *    env GRIST_OIDC_SP_ENABLE_SILENT_LOGIN
+ *        If set to "true", when an anonymous user visits a Grist page, Grist attempts a "silent login":
+ *        an OIDC authentication request with prompt=none. If the user already has an active session
+ *        at the IdP, they are logged into Grist without any interaction; otherwise they continue
+ *        browsing anonymously (no error is shown). A failed attempt is remembered in a cookie for a
+ *        few minutes, so anonymous visitors are not redirected on every page load.
+ *        Defaults to false.
  *
  * This version of OIDCConfig has been tested with Keycloak OIDC IdP following the instructions
  * at:
@@ -69,7 +76,7 @@ import { OIDC_PROVIDER_KEY } from "app/common/loginProviders";
 import { UserProfile } from "app/common/LoginSessionAPI";
 import { StringUnionError } from "app/common/StringUnion";
 import { appSettings, AppSettings } from "app/server/lib/AppSettings";
-import { RequestWithLogin } from "app/server/lib/Authorizer";
+import { RequestWithLogin, signInStatusCookieName } from "app/server/lib/Authorizer";
 import { SessionObj } from "app/server/lib/BrowserSession";
 import { GristLoginSystem, GristServer } from "app/server/lib/GristServer";
 import { getHomeUrl } from "app/server/lib/gristSettings";
@@ -81,6 +88,7 @@ import { getOriginUrl } from "app/server/lib/requestUtils";
 import { SendAppPageFunction } from "app/server/lib/sendAppPage";
 import { Sessions } from "app/server/lib/Sessions";
 
+import * as cookie from "cookie";
 import * as express from "express";
 import pick from "lodash/pick";
 import {
@@ -89,6 +97,28 @@ import {
 
 // OIDC callback endpoint path.
 const OIDC_CALLBACK_ENDPOINT = "/oauth2/callback";
+
+// Endpoint initiating a silent login attempt (see GRIST_OIDC_SP_ENABLE_SILENT_LOGIN).
+// It lives alongside the callback endpoint so that it is registered after the session
+// middleware, which the wildcard middleware triggering it is not.
+const OIDC_SILENT_LOGIN_ENDPOINT = "/oauth2/silent-login";
+
+// Cookie marking that a silent login was recently attempted, to avoid redirecting anonymous
+// visitors to the IdP on every page load.
+const SILENT_LOGIN_ATTEMPTED_COOKIE = "grist_oidc_silent_login_attempted";
+
+// How long to wait before retrying a silent login for the same browser.
+const SILENT_LOGIN_RETRY_DELAY_MS = 5 * 60 * 1000;
+
+// Error codes an IdP may return for a prompt=none request when interactive authentication
+// is needed (OpenID Connect Core 1.0, section 3.1.2.6). These are the expected way for a
+// silent login attempt to "fail" when the user has no active session at the IdP.
+const SILENT_LOGIN_EXPECTED_ERRORS = new Set([
+  "login_required",
+  "interaction_required",
+  "consent_required",
+  "account_selection_required",
+]);
 
 function formatTokenForLogs(token: TokenSet) {
   const showValueInClear = ["token_type", "expires_in", "expires_at", "scope"];
@@ -143,6 +173,8 @@ export interface OIDCConfig {
   readonly enabledProtections: Set<EnabledProtectionString>;
   /** The scopes to request from the IdP, as a space-separated list (e.g., "openid email profile"). */
   readonly scopes: string;
+  /** If true, attempts to silently log in anonymous users using prompt=none. */
+  readonly enableSilentLogin: boolean;
 }
 
 /**
@@ -216,6 +248,11 @@ export function readOIDCConfigFromSettings(settings: AppSettings): OIDCConfig {
 
   const scopes = process.env.GRIST_OIDC_IDP_SCOPES || "openid email profile";
 
+  const enableSilentLogin = section.flag("enableSilentLogin").readBool({
+    envVar: "GRIST_OIDC_SP_ENABLE_SILENT_LOGIN",
+    defaultValue: false,
+  })!;
+
   return {
     spHost,
     issuerUrl,
@@ -231,6 +268,7 @@ export function readOIDCConfigFromSettings(settings: AppSettings): OIDCConfig {
     extraMetadata,
     enabledProtections,
     scopes,
+    enableSilentLogin,
   };
 }
 
@@ -308,6 +346,50 @@ export class OIDCBuilder {
 
   public addEndpoints(app: express.Application, sessions: Sessions): void {
     app.get(OIDC_CALLBACK_ENDPOINT, this.handleCallback.bind(this, sessions));
+    if (this._config.enableSilentLogin) {
+      app.get(OIDC_SILENT_LOGIN_ENDPOINT, this.handleSilentLogin.bind(this));
+    }
+  }
+
+  /**
+   * Middleware that sends anonymous visitors through a silent login attempt (prompt=none).
+   *
+   * It runs before the session middleware, so it only relies on cookies: the sign-in status
+   * cookie tells whether the user is already logged in, and a dedicated cookie remembers that
+   * an attempt was made recently. The actual authentication URL is forged by the
+   * /oauth2/silent-login endpoint, which does have access to the session.
+   */
+  public getSilentLoginMiddleware(): express.RequestHandler[] {
+    if (!this._config.enableSilentLogin) { return []; }
+    return [(req, res, next) => {
+      if (!this._shouldAttemptSilentLogin(req)) { return next(); }
+      const targetUrl = new URL(req.originalUrl, getOriginUrl(req)).href;
+      res.redirect(`${OIDC_SILENT_LOGIN_ENDPOINT}?next=${encodeURIComponent(targetUrl)}`);
+    }];
+  }
+
+  /**
+   * Handles GET /oauth2/silent-login: stores the usual protections in the session and redirects
+   * to the IdP with prompt=none. The IdP either sends the user back logged in, or with an error
+   * such as login_required, which the callback turns into a plain redirect to the target page.
+   */
+  public async handleSilentLogin(req: express.Request, res: express.Response): Promise<void> {
+    // Mark the attempt before anything else, so that a failed attempt is not retried on every
+    // subsequent page load.
+    res.cookie(SILENT_LOGIN_ATTEMPTED_COOKIE, "1", {
+      httpOnly: true,
+      sameSite: "lax",
+      path: "/",
+      maxAge: SILENT_LOGIN_RETRY_DELAY_MS,
+    });
+    const targetUrl = this._getSafeTargetUrl(req);
+    try {
+      const redirectUrl = await this.getSilentLoginRedirectUrl(req, targetUrl);
+      res.redirect(redirectUrl);
+    } catch (err) {
+      log.warn(`OIDCConfig: failed to initiate silent login: ${err.message}`);
+      res.redirect(targetUrl.href);
+    }
   }
 
   public async handleCallback(sessions: Sessions, req: express.Request, res: express.Response): Promise<void> {
@@ -320,6 +402,7 @@ export class OIDCBuilder {
     }
 
     let targetUrl: string | undefined;
+    const isSilentLoginAttempt = mreq.session.oidc?.silentLogin === true;
 
     try {
       const params = this._client.callbackParams(req);
@@ -362,6 +445,20 @@ export class OIDCBuilder {
       };
       res.redirect(targetUrl ?? "/");
     } catch (err) {
+      if (isSilentLoginAttempt) {
+        // The user never asked to log in, so any failure should quietly bring them back to the
+        // page they wanted to visit, as an anonymous visitor. Errors like login_required are the
+        // expected way for the IdP to report that no session is active there.
+        if (this._isExpectedSilentLoginError(err)) {
+          log.info(`OIDCConfig: silent login failed (${err.error}), continuing anonymously`);
+        } else {
+          log.warn(`OIDC silent login attempt failed: ${err.stack}`);
+        }
+        // Session deletion must be done before sending the response.
+        delete mreq.session.oidc;
+        return res.redirect(targetUrl ?? "/");
+      }
+
       log.error(`OIDC callback failed: ${err.stack}`);
       const maybeResponse = this._maybeExtractDetailsFromError(err);
       if (maybeResponse) {
@@ -379,18 +476,16 @@ export class OIDCBuilder {
   }
 
   public async getLoginRedirectUrl(req: express.Request, targetUrl: URL): Promise<string> {
-    const mreq = this._getRequestWithSession(req);
+    return this._buildAuthUrl(req, targetUrl);
+  }
 
-    mreq.session.oidc = {
-      targetUrl: targetUrl.href,
-      ...this._protectionManager.generateSessionInfo(),
-    };
-
-    return this._client.authorizationUrl({
-      scope: this._config.scopes,
-      acr_values: this._config.acrValues,
-      ...this._protectionManager.forgeAuthUrlParams(mreq.session.oidc),
-    });
+  /**
+   * Like getLoginRedirectUrl(), but for a silent login attempt: asks the IdP not to prompt the
+   * user (prompt=none), and marks the session so that the callback knows to quietly fall back
+   * to anonymous browsing on failure.
+   */
+  public async getSilentLoginRedirectUrl(req: express.Request, targetUrl: URL): Promise<string> {
+    return this._buildAuthUrl(req, targetUrl, { silent: true });
   }
 
   public async getLogoutRedirectUrl(req: express.Request, redirectUrl: URL): Promise<string> {
@@ -451,6 +546,71 @@ export class OIDCBuilder {
         errTargetUrl: targetUrl ?? "/",
       },
     });
+  }
+
+  private async _buildAuthUrl(
+    req: express.Request,
+    targetUrl: URL,
+    options: { silent?: boolean } = {},
+  ): Promise<string> {
+    const mreq = this._getRequestWithSession(req);
+
+    mreq.session.oidc = {
+      targetUrl: targetUrl.href,
+      ...(options.silent ? { silentLogin: true } : {}),
+      ...this._protectionManager.generateSessionInfo(),
+    };
+
+    return this._client.authorizationUrl({
+      scope: this._config.scopes,
+      acr_values: this._config.acrValues,
+      ...(options.silent ? { prompt: "none" } : {}),
+      ...this._protectionManager.forgeAuthUrlParams(mreq.session.oidc),
+    });
+  }
+
+  private _shouldAttemptSilentLogin(req: express.Request): boolean {
+    // Only trigger on page navigations, not on API calls or asset requests.
+    if (req.method !== "GET") { return false; }
+    if (!req.headers.accept?.includes("text/html")) { return false; }
+    // Modern browsers tell us the destination of the request; only redirect top-level
+    // navigations, so that embeds (iframes) are left alone.
+    const fetchDest = req.headers["sec-fetch-dest"];
+    if (fetchDest && fetchDest !== "document") { return false; }
+    // Don't interfere with the login/logout flows themselves.
+    if (this._isAuthPath(req.path)) { return false; }
+    const cookies = cookie.parse(req.headers.cookie || "");
+    // Skip users that are already signed in.
+    if (cookies[signInStatusCookieName]) { return false; }
+    // Skip browsers for which a silent login was attempted recently.
+    if (cookies[SILENT_LOGIN_ATTEMPTED_COOKIE]) { return false; }
+    return true;
+  }
+
+  private _isAuthPath(path: string): boolean {
+    // Strip an /o/<org> prefix, present when the org is encoded in the path.
+    const strippedPath = path.replace(/^\/o\/[^/]+/, "");
+    return /^\/(oauth2\/|(login|signin|signup|logout|signed-out)\/?$)/.test(strippedPath);
+  }
+
+  /**
+   * Returns the URL to send the user back to after a silent login attempt, based on the "next"
+   * query parameter. Only same-origin URLs are allowed, to prevent open redirects.
+   */
+  private _getSafeTargetUrl(req: express.Request): URL {
+    const origin = getOriginUrl(req);
+    try {
+      const next = typeof req.query.next === "string" ? req.query.next : "/";
+      const url = new URL(next, origin);
+      if (url.origin === new URL(origin).origin) { return url; }
+    } catch (err) {
+      // Fall through to the origin URL.
+    }
+    return new URL(origin);
+  }
+
+  private _isExpectedSilentLoginError(err: Error): err is OIDCError.OPError {
+    return err instanceof OIDCError.OPError && !!err.error && SILENT_LOGIN_EXPECTED_ERRORS.has(err.error);
   }
 
   private _getRequestWithSession(req: express.Request) {
@@ -518,6 +678,7 @@ async function getLoginSystem(settings: AppSettings): Promise<GristLoginSystem> 
         getLoginRedirectUrl: oidcBuilder.getLoginRedirectUrl.bind(oidcBuilder),
         getSignUpRedirectUrl: oidcBuilder.getLoginRedirectUrl.bind(oidcBuilder),
         getLogoutRedirectUrl: oidcBuilder.getLogoutRedirectUrl.bind(oidcBuilder),
+        getWildcardMiddleware: oidcBuilder.getSilentLoginMiddleware.bind(oidcBuilder),
         async addEndpoints(app: express.Express) {
           oidcBuilder.addEndpoints(app, gristServer.getSessions());
           return OIDC_PROVIDER_KEY;

@@ -86,6 +86,10 @@ export interface SessionOIDCInfo {
   targetUrl?: string;
   // Stores user claims signed by the issuer, store it to allow loging out.
   idToken?: string;
+  // Set when the ongoing authentication is a silent login attempt (prompt=none), so that the
+  // callback knows to quietly send the user back to the target page on failure instead of
+  // showing an error page.
+  silentLogin?: boolean;
 }
 
 /**
